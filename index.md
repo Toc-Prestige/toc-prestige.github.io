@@ -1,11 +1,8 @@
-# TOC PRESTIGE
-Règles officielles du jeu de Toc, version *prestige*.
-
 ## Matériel
 
 ...
 
-## Objectif
+## Principe
 
 ...
 
