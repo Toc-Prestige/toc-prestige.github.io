@@ -6,7 +6,7 @@
 - 4 pions par joueur, d'une couleur par joueur
 - 2 jeux de 52 cartes (sans joker), mélangés ensemble
 
-![Plateau de Tock](board-image/tock_board_round.svg)
+<iframe src="board-image/board3d.html" width="100%" height="500" style="border:0;" loading="lazy" allowfullscreen title="Plateau de Tock"></iframe>
 
 ## Principe
 

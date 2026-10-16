@@ -1,0 +1,366 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ---- geometry constants, same as gen_board.js (SVG px -> world units, 1 unit = 100 px) ----
+const S = 0.01;
+const RR = 330 * S;          // radius of the main road
+const STEP = 36 * S;         // distance between goal lane / stash cells
+const STASH_X = 430 * S;     // stash distance from the center
+const ARROW_R = 380 * S;
+const BOARD = 9.8;           // side of the square base
+const BASE_H = 0.14;         // thickness of the base
+const camps = [
+  { name: 'joueur 1', color: '#e8344a' },
+  { name: 'joueur 2', color: '#2f6bff' },
+  { name: 'joueur 3', color: '#18b56a' },
+  { name: 'joueur 4', color: '#ffb81c' },
+];
+
+const rad = (deg) => (deg * Math.PI) / 180;
+// angle (degrees) of the n-th cell (1..18) of camp k, same convention as the SVG
+const cellAngle = (k, n) => -90 + k * 90 + (n - 1) * 5;
+const polar = (angle, r) => [r * Math.cos(rad(angle)), r * Math.sin(rad(angle))];
+
+// ---- renderer / scene ----
+const PIXEL_RATIO = Math.min(devicePixelRatio, 2);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(PIXEL_RATIO);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.VSMShadowMap; // soft, blurred shadows
+// no tone mapping: the soft background gradient goes through the post-processing chain untouched
+renderer.toneMapping = THREE.NoToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+// soft studio gradient behind the board
+const BACKGROUND = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 512;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(256, 190, 20, 256, 256, 400);
+  g.addColorStop(0, '#fafbfe');
+  g.addColorStop(0.55, '#e8edfa');
+  g.addColorStop(1, '#cdd8f1');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 512, 512);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+})();
+scene.background = BACKGROUND;
+
+// cool sky / warm key / cool fill: the color shift between them gives the smooth gradients on the plastic
+scene.add(new THREE.HemisphereLight(0xf4f7ff, 0x8d9fd6, 0.4));
+const sun = new THREE.DirectionalLight(0xfff1e0, 0.8);
+sun.position.set(-5, 11, 7);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8, near: 1, far: 30 });
+sun.shadow.bias = -0.0005;
+sun.shadow.normalBias = 0.02;
+sun.shadow.radius = 5;
+sun.shadow.blurSamples = 16;
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xb9ccff, 0.3);
+fill.position.set(7, 5, -6);
+scene.add(fill);
+
+// classic perspective camera, starting from a 3/4 view
+const ELEVATION = rad(40);
+const AZIMUTH = Math.PI / 4;
+const DISTANCE = 19 * Math.max(1, 1.2 / (innerWidth / innerHeight));
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(
+  DISTANCE * Math.cos(ELEVATION) * Math.cos(AZIMUTH),
+  DISTANCE * Math.sin(ELEVATION),
+  DISTANCE * Math.cos(ELEVATION) * Math.sin(AZIMUTH),
+);
+
+// full orbit: free rotation around the board (no polar clamp, no flip at the poles)
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.enablePan = false;
+controls.minPolarAngle = 0;
+controls.maxPolarAngle = Math.PI;
+controls.minDistance = 6;
+controls.maxDistance = 50;
+controls.target.set(0, 0, 0);
+controls.update();
+controls.saveState();
+renderer.domElement.addEventListener('dblclick', () => controls.reset());
+
+// ---- post-processing: ambient occlusion + selective bloom (only the colored lines glow) ----
+const makeTarget = () => new THREE.WebGLRenderTarget(innerWidth * PIXEL_RATIO, innerHeight * PIXEL_RATIO, {
+  type: THREE.HalfFloatType, samples: 4,
+});
+
+const bloomComposer = new EffectComposer(renderer);
+bloomComposer.renderToScreen = false;
+bloomComposer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.3, 0.25, 0);
+bloomComposer.addPass(bloomPass);
+
+const finalComposer = new EffectComposer(renderer, makeTarget());
+finalComposer.setPixelRatio(PIXEL_RATIO); // a custom target defaults to ratio 1, which made the whole render half-resolution
+finalComposer.addPass(new RenderPass(scene, camera));
+const aoPass = new GTAOPass(scene, camera, innerWidth, innerHeight);
+aoPass.updateGtaoMaterial({ radius: 0.7, distanceExponent: 1.5, thickness: 1.5, scale: 1.8, samples: 16 });
+aoPass.blendIntensity = 1;
+// the AO pass re-renders the scene with an override material, which turns the background quad into a
+// real black plane at the origin: hide the background while it runs (it is already in the buffer)
+const aoRender = aoPass.render.bind(aoPass);
+aoPass.render = (...args) => {
+  scene.background = null;
+  aoRender(...args);
+  scene.background = BACKGROUND;
+};
+finalComposer.addPass(aoPass);
+const mixPass = new ShaderPass(new THREE.ShaderMaterial({
+  uniforms: { baseTexture: { value: null }, bloomTexture: { value: bloomComposer.renderTarget2.texture } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: 'uniform sampler2D baseTexture; uniform sampler2D bloomTexture; varying vec2 vUv; void main() { gl_FragColor = texture2D(baseTexture, vUv) + vec4(texture2D(bloomTexture, vUv).rgb, 0.0); }',
+}), 'baseTexture');
+mixPass.needsSwap = true;
+finalComposer.addPass(mixPass);
+finalComposer.addPass(new OutputPass());
+
+// bloom pass: everything that does not glow is painted black (it still hides what is behind it)
+const darkMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+const stash = new Map();
+function renderBloom() {
+  scene.background = null;
+  scene.traverse((o) => {
+    if (!o.isMesh) return;
+    if (o.userData.hideInBloom) { stash.set(o, o.visible); o.visible = false; }
+    else if (!o.material.userData.glow) { stash.set(o, o.material); o.material = darkMaterial; }
+  });
+  bloomComposer.render();
+  stash.forEach((v, o) => { if (typeof v === 'boolean') o.visible = v; else o.material = v; });
+  stash.clear();
+  scene.background = BACKGROUND;
+}
+
+function resize() {
+  const w = innerWidth, h = innerHeight, aspect = w / h;
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  bloomComposer.setSize(w, h);
+  finalComposer.setSize(w, h);
+}
+addEventListener('resize', resize);
+resize();
+
+// ---- materials ----
+// soft, slightly satin plastic: wider highlights and gentler reflections read as smoother gradients
+const PLASTIC = { roughness: 0.5, metalness: 0, clearcoat: 0.6, clearcoatRoughness: 0.35, envMapIntensity: 0.35 };
+const plastic = new THREE.MeshPhysicalMaterial({ color: 0xf7f8fc, ...PLASTIC });
+const beige = new THREE.MeshPhysicalMaterial({ color: 0xf1f2f5, ...PLASTIC });
+const matCache = new Map();
+const glow = (color) => {
+  if (!matCache.has(color)) {
+    const m = new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: 0.8, roughness: 0.4, metalness: 0,
+    });
+    m.userData.glow = true;
+    matCache.set(color, m);
+  }
+  return matCache.get(color);
+};
+const tinted = (color, amount) => {
+  const key = color + ':' + amount;
+  if (!matCache.has(key)) {
+    const c = new THREE.Color(0xf7f8fc).lerp(new THREE.Color(color), amount);
+    matCache.set(key, new THREE.MeshPhysicalMaterial({ color: c, ...PLASTIC }));
+  }
+  return matCache.get(key);
+};
+
+// ---- helpers ----
+// rounded box: w (x) by d (z) footprint, h tall, sitting on y = 0
+const geoCache = new Map();
+function rbox(w, d, h, r, bs = 0.015) {
+  const key = [w, d, h, r, bs].join(',');
+  if (geoCache.has(key)) return geoCache.get(key);
+  const ww = w - 2 * bs, dd = d - 2 * bs;
+  const rr = Math.max(0.001, Math.min(r - bs, ww / 2, dd / 2));
+  const s = new THREE.Shape();
+  s.moveTo(-ww / 2 + rr, -dd / 2);
+  s.lineTo(ww / 2 - rr, -dd / 2);
+  s.quadraticCurveTo(ww / 2, -dd / 2, ww / 2, -dd / 2 + rr);
+  s.lineTo(ww / 2, dd / 2 - rr);
+  s.quadraticCurveTo(ww / 2, dd / 2, ww / 2 - rr, dd / 2);
+  s.lineTo(-ww / 2 + rr, dd / 2);
+  s.quadraticCurveTo(-ww / 2, dd / 2, -ww / 2, dd / 2 - rr);
+  s.lineTo(-ww / 2, -dd / 2 + rr);
+  s.quadraticCurveTo(-ww / 2, -dd / 2, -ww / 2 + rr, -dd / 2);
+  const g = new THREE.ExtrudeGeometry(s, {
+    depth: Math.max(0.001, h - 2 * bs), bevelEnabled: true,
+    bevelThickness: bs, bevelSize: bs, bevelSegments: 2, curveSegments: 6,
+  });
+  g.translate(0, 0, bs);
+  g.rotateX(-Math.PI / 2);
+  geoCache.set(key, g);
+  return g;
+}
+function mesh(geo, mat, parent, x = 0, y = 0, z = 0) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  m.castShadow = m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+
+const world = new THREE.Group(); // floats gently
+scene.add(world);
+
+// ---- base: thin white square slab with a colored line on each side ----
+mesh(rbox(BOARD, BOARD, BASE_H, 0.45, 0.03), beige, world);
+camps.forEach((camp, k) => {
+  const side = new THREE.Group();
+  side.rotation.y = -k * Math.PI / 2; // camp k sits on side k (camp 0 on +x)
+  world.add(side);
+  // stripe on the vertical face of the slab
+  mesh(rbox(0.05, 5.2, 0.035, 0.02, 0.008), glow(camp.color), side, BOARD / 2 + 0.005, BASE_H / 2 - 0.0175, 0);
+  // inset line on the top face, near the edge
+  mesh(rbox(0.07, 6.2, 0.012, 0.035, 0.004), glow(camp.color), side, BOARD / 2 - 0.2, BASE_H, 0);
+});
+
+// ---- cells ----
+const TOP_Y = BASE_H;
+function cell(parent, x, z, angle, color, { size = 0.25, thick = 0.032, goal = false } = {}) {
+  const g = new THREE.Group();
+  g.position.set(x, TOP_Y, z);
+  g.rotation.y = -rad(angle);
+  parent.add(g);
+  mesh(rbox(size + 2 * thick, size + 2 * thick, 0.045, 0.06), glow(color), g);
+  mesh(rbox(size, size, 0.07, 0.04), goal ? tinted(color, 0.28) : plastic, g);
+  return g;
+}
+
+// colored line connecting the cells of a quarter of the road
+function arc(parent, a0, a1, r, color, width = 0.045) {
+  const g = new THREE.RingGeometry(r - width / 2, r + width / 2, 64, 1, -rad(a1), rad(a1 - a0));
+  g.rotateX(-Math.PI / 2);
+  const m = new THREE.Mesh(g, glow(color));
+  m.position.y = TOP_Y + 0.003;
+  m.receiveShadow = true;
+  parent.add(m);
+}
+
+const goalA = (k) => cellAngle(k, 19 - 3); // cell labeled 3
+
+camps.forEach((camp, k) => {
+  // main road
+  for (let n = 1; n <= 18; n++) {
+    const a = cellAngle(k, n);
+    const [x, z] = polar(a, RR);
+    const label = 19 - n;
+    cell(world, x, z, a, camp.color, label === 1 ? { thick: 0.06 } : {});
+  }
+  arc(world, cellAngle(k, 1), cellAngle(k, 18), RR, camp.color);
+
+  // goal lane: 4 cells inward from cell 3
+  const ag = goalA(k);
+  const laneLen = 4 * STEP;
+  const lane = new THREE.Group();
+  lane.rotation.y = -rad(ag);
+  lane.position.y = TOP_Y + 0.003;
+  world.add(lane);
+  mesh(rbox(laneLen, 0.045, 0.004, 0.02, 0.001), glow(camp.color), lane, RR - laneLen / 2, 0, 0);
+  for (let j = 1; j <= 4; j++) {
+    const [x, z] = polar(ag, RR - j * STEP);
+    cell(world, x, z, ag, camp.color, { goal: true });
+  }
+
+  // stash: built for camp 0 (+x side), then turned by k quarter turns
+  const stash = new THREE.Group();
+  stash.rotation.y = -k * Math.PI / 2;
+  world.add(stash);
+  const sz0 = RR * Math.sin(rad(cellAngle(0, 18)));
+  mesh(rbox(0.62, 4 * STEP + 0.26, 0.02, 0.31, 0.006), glow(camp.color), stash, STASH_X, TOP_Y, sz0);
+  mesh(rbox(0.54, 4 * STEP + 0.18, 0.04, 0.27, 0.01), plastic, stash, STASH_X, TOP_Y, sz0);
+  for (let j = 0; j < 4; j++) {
+    const z = sz0 + (j - 1.5) * STEP;
+    cell(stash, STASH_X, z, 0, camp.color);
+    stash.add(pawn(camp.color, STASH_X, TOP_Y + 0.07, z));
+  }
+});
+
+// cute pawn: white body and head, colored band
+function pawn(color, x, y, z) {
+  const g = new THREE.Group();
+  g.position.set(x, y, z);
+  mesh(new THREE.CylinderGeometry(0.05, 0.085, 0.16, 24), plastic, g, 0, 0.08, 0);
+  mesh(new THREE.SphereGeometry(0.075, 24, 16), plastic, g, 0, 0.22, 0);
+  const band = mesh(new THREE.TorusGeometry(0.066, 0.016, 10, 28), glow(color), g, 0, 0.1, 0);
+  band.rotation.x = Math.PI / 2;
+  return g;
+}
+
+// ---- direction arrow along the road, outside it (clockwise, like the SVG) ----
+{
+  const a0 = cellAngle(0, 18) + 5, a1 = a0 + 40;
+  const col = '#9aa7cf';
+  arc(world, a0, a1 - 3, ARROW_R, col, 0.06);
+  const head = new THREE.Shape();
+  head.moveTo(0.16, 0); head.lineTo(-0.1, 0.13); head.lineTo(-0.1, -0.13); head.closePath();
+  const hg = new THREE.ShapeGeometry(head);
+  hg.rotateX(-Math.PI / 2);
+  const hm = new THREE.Mesh(hg, glow(col));
+  const [hx, hz] = polar(a1, ARROW_R);
+  hm.position.set(hx, TOP_Y + 0.004, hz);
+  hm.rotation.y = -rad(a1 + 90);
+  world.add(hm);
+}
+
+// ---- pile of cards in the center ----
+{
+  const CARD_W = 1.05, CARD_D = 1.5, CARD_H = 0.014, COUNT = 22;
+  const pile = new THREE.Group();
+  pile.position.y = TOP_Y;
+  world.add(pile);
+  const jitter = (i) => Math.sin(i * 12.9898) * 43758.5453 % 1; // deterministic pseudo-random in (-1, 1)
+  for (let i = 0; i < COUNT; i++) {
+    const c = mesh(rbox(CARD_W, CARD_D, CARD_H, 0.06, 0.003), plastic, pile, jitter(i) * 0.03, i * CARD_H, jitter(i + 50) * 0.03);
+    c.rotation.y = rad(-25) + jitter(i + 100) * 0.12;
+  }
+  // card back on top: colored frame, tinted face, one dot per camp
+  const top = new THREE.Group();
+  top.position.y = COUNT * CARD_H;
+  top.rotation.y = rad(-25);
+  pile.add(top);
+  mesh(rbox(CARD_W - 0.08, CARD_D - 0.08, 0.004, 0.05, 0.001), glow('#8a9bd8'), top);
+  mesh(rbox(CARD_W - 0.14, CARD_D - 0.14, 0.008, 0.04, 0.001), tinted('#8a9bd8', 0.18), top);
+  camps.forEach((camp, k) => {
+    const dx = k % 2 ? 0.18 : -0.18, dz = k < 2 ? -0.18 : 0.18;
+    mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.012, 24), glow(camp.color), top, dx, 0.008, dz);
+  });
+}
+
+// ---- soft shadow on the ground ----
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.ShadowMaterial({ opacity: 0.3 }));
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.55;
+ground.receiveShadow = true;
+ground.userData.hideInBloom = true;
+scene.add(ground);
+
+// ---- loop ----
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  world.position.y = Math.sin(clock.getElapsedTime() * 1.2) * 0.06;
+  controls.update();
+  renderBloom();
+  finalComposer.render();
+});
