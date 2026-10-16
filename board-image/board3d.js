@@ -233,9 +233,9 @@ const FALL = 0.5;       // fall duration (s)
 const STEP_T = 0.035;   // delay between two pieces (s)
 const drops = [];       // { obj, delay, y0, height, light }
 const lights = [];      // { obj, delay }: lines that light up at a given time without falling
-function drop(obj, delay, { height = 1.1, light = false } = {}) {
+function drop(obj, delay, { height = 1.1, light = false, squash = true } = {}) {
   obj.visible = false;
-  drops.push({ obj, delay, y0: obj.position.y, height, light, state: 0 });
+  drops.push({ obj, delay, y0: obj.position.y, height, light, squash, state: 0 });
 }
 const lightUp = (obj, delay) => lights.push({ obj, delay, done: false });
 function startLight(obj, T) {
@@ -366,7 +366,7 @@ function pawn(color, x, y, z) {
 
 // ---- pile of cards in the center ----
 {
-  const CARD_W = 1.05, CARD_D = 1.5, CARD_H = 0.014, COUNT = 22;
+  const CARD_W = 1.05, CARD_D = 1.5, CARD_H = 0.014, COUNT = 10;
   const pile = new THREE.Group();
   pile.position.y = TOP_Y;
   world.add(pile);
@@ -374,6 +374,8 @@ function pawn(color, x, y, z) {
   for (let i = 0; i < COUNT; i++) {
     const c = mesh(rbox(CARD_W, CARD_D, CARD_H, 0.06, 0.003), plastic, pile, jitter(i) * 0.03, i * CARD_H, jitter(i + 50) * 0.03);
     c.rotation.y = rad(-25) + jitter(i + 100) * 0.12;
+    // accordion: the cards come down one after another, the upper ones from higher up, and collapse into the pile
+    drop(c, t + 0.1 + i * 0.03, { height: 0.5 + i * 0.075, squash: false });
   }
   // card back on top: colored frame, tinted face, one dot per camp
   const top = new THREE.Group();
@@ -382,12 +384,39 @@ function pawn(color, x, y, z) {
   pile.add(top);
   mesh(rbox(CARD_W - 0.08, CARD_D - 0.08, 0.004, 0.05, 0.001), glow('#8a9bd8'), top);
   mesh(rbox(CARD_W - 0.14, CARD_D - 0.14, 0.008, 0.04, 0.001), tinted('#8a9bd8', 0.18), top);
+  // card back: "TOCK" over "Prestige", with a small bar in each camp color
+  const cv = document.createElement('canvas');
+  cv.width = 1024; cv.height = 640;
+  const cx = cv.getContext('2d');
+  cx.textAlign = 'center';
+  cx.textBaseline = 'middle';
+  cx.fillStyle = '#3b4670';
+  cx.font = '800 250px "Trebuchet MS", Arial, sans-serif';
+  if ('letterSpacing' in cx) cx.letterSpacing = '24px';
+  cx.fillText('TOCK', 512 + 12, 200);
+  if ('letterSpacing' in cx) cx.letterSpacing = '2px';
+  cx.fillStyle = '#5a6aa3';
+  cx.font = 'italic 900 185px "Trebuchet MS", Arial, sans-serif';
+  cx.fillText('Prestige', 512, 415);
   camps.forEach((camp, k) => {
-    const dx = k % 2 ? 0.18 : -0.18, dz = k < 2 ? -0.18 : 0.18;
-    mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.012, 24), glow(camp.color), top, dx, 0.008, dz);
+    cx.fillStyle = camp.color;
+    cx.beginPath();
+    cx.roundRect(512 - 164 + k * 86, 540, 76, 22, 11);
+    cx.fill();
   });
-  drop(pile, t + 0.1, { height: 2.2, light: true });
-  t += 0.1 + STEP_T;
+  const label = new THREE.CanvasTexture(cv);
+  label.colorSpace = THREE.SRGBColorSpace;
+  label.anisotropy = 8;
+  const labelGeo = new THREE.PlaneGeometry(1.2, 0.75);
+  labelGeo.rotateX(-Math.PI / 2);
+  const text = new THREE.Mesh(labelGeo, new THREE.MeshStandardMaterial({
+    map: label, transparent: true, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -2,
+  }));
+  text.position.y = 0.0095;
+  text.rotation.y = Math.PI / 2; // reads along the long side of the card
+  top.add(text);
+  drop(top, t + 0.1 + COUNT * 0.03, { height: 0.5 + COUNT * 0.075, light: true, squash: false });
+  t += 0.1 + COUNT * 0.03 + STEP_T;
 }
 sides.forEach((side) => lightUp(side, 0));
 // nothing lights up until the very last piece has landed, then every colored line switches on together
@@ -420,7 +449,7 @@ function animateIntro(T) {
       if (d.state === 1) d.state = 2;
       const b = (T - d.delay - FALL) / 0.18;                  // small squash when landing
       d.obj.position.y = d.y0;
-      d.obj.scale.set(1, 1 - 0.14 * Math.sin(Math.PI * clamp01(b)), 1);
+      d.obj.scale.set(1, 1 - (d.squash ? 0.14 : 0) * Math.sin(Math.PI * clamp01(b)), 1);
       if (b >= 1) { d.obj.scale.setScalar(1); d.state = 3; }
     }
   }
