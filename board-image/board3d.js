@@ -107,7 +107,7 @@ const makeTarget = () => new THREE.WebGLRenderTarget(innerWidth * PIXEL_RATIO, i
 const bloomComposer = new EffectComposer(renderer);
 bloomComposer.renderToScreen = false;
 bloomComposer.addPass(new RenderPass(scene, camera));
-const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.3, 0.25, 0);
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.3, 0.05, 0);
 bloomComposer.addPass(bloomPass);
 
 const finalComposer = new EffectComposer(renderer, makeTarget());
@@ -126,9 +126,9 @@ aoPass.render = (...args) => {
 };
 finalComposer.addPass(aoPass);
 const mixPass = new ShaderPass(new THREE.ShaderMaterial({
-  uniforms: { baseTexture: { value: null }, bloomTexture: { value: bloomComposer.renderTarget2.texture } },
+  uniforms: { baseTexture: { value: null }, bloomTexture: { value: bloomComposer.renderTarget2.texture }, bloomAmount: { value: 1 } },
   vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: 'uniform sampler2D baseTexture; uniform sampler2D bloomTexture; varying vec2 vUv; void main() { gl_FragColor = texture2D(baseTexture, vUv) + vec4(texture2D(bloomTexture, vUv).rgb, 0.0); }',
+  fragmentShader: 'uniform sampler2D baseTexture; uniform sampler2D bloomTexture; uniform float bloomAmount; varying vec2 vUv; void main() { gl_FragColor = texture2D(baseTexture, vUv) + vec4(texture2D(bloomTexture, vUv).rgb * bloomAmount, 0.0); }',
 }), 'baseTexture');
 mixPass.needsSwap = true;
 finalComposer.addPass(mixPass);
@@ -142,7 +142,8 @@ function renderBloom() {
   scene.traverse((o) => {
     if (!o.isMesh) return;
     if (o.userData.hideInBloom) { stash.set(o, o.visible); o.visible = false; }
-    else if (!o.material.userData.glow) { stash.set(o, o.material); o.material = darkMaterial; }
+    // lines that are not lit yet do not bloom
+    else if (!o.material.userData.glow || o.material.emissiveIntensity <= 0) { stash.set(o, o.material); o.material = darkMaterial; }
   });
   bloomComposer.render();
   stash.forEach((v, o) => { if (typeof v === 'boolean') o.visible = v; else o.material = v; });
@@ -165,17 +166,20 @@ resize();
 // soft, slightly satin plastic: wider highlights and gentler reflections read as smoother gradients
 const PLASTIC = { roughness: 0.5, metalness: 0, clearcoat: 0.6, clearcoatRoughness: 0.35, envMapIntensity: 0.35 };
 const plastic = new THREE.MeshPhysicalMaterial({ color: 0xf7f8fc, ...PLASTIC });
-const beige = new THREE.MeshPhysicalMaterial({ color: 0xf1f2f5, ...PLASTIC });
+const beige = new THREE.MeshPhysicalMaterial({ color: 0x4a4e5a, ...PLASTIC });
 const matCache = new Map();
+// every colored line gets its own material so it can light up on its own, when its piece lands
+const UNLIT = new THREE.Color(0xdadde6);
+const litMats = [];
 const glow = (color) => {
-  if (!matCache.has(color)) {
-    const m = new THREE.MeshStandardMaterial({
-      color, emissive: color, emissiveIntensity: 0.8, roughness: 0.4, metalness: 0,
-    });
-    m.userData.glow = true;
-    matCache.set(color, m);
-  }
-  return matCache.get(color);
+  const target = new THREE.Color(color);
+  const m = new THREE.MeshStandardMaterial({
+    color: UNLIT.clone().lerp(target, 0.12), emissive: target, emissiveIntensity: 0, roughness: 0.4, metalness: 0,
+  });
+  m.userData.glow = true;
+  m.userData.lit = { target, t0: null };
+  litMats.push(m);
+  return m;
 };
 const tinted = (color, amount) => {
   const key = color + ':' + amount;
@@ -224,9 +228,28 @@ function mesh(geo, mat, parent, x = 0, y = 0, z = 0) {
 const world = new THREE.Group(); // floats gently
 scene.add(world);
 
+// ---- intro timeline: pieces fall one by one, then all the colored lines light up together ----
+const FALL = 0.5;       // fall duration (s)
+const STEP_T = 0.035;   // delay between two pieces (s)
+const drops = [];       // { obj, delay, y0, height, light }
+const lights = [];      // { obj, delay }: lines that light up at a given time without falling
+function drop(obj, delay, { height = 1.1, light = false } = {}) {
+  obj.visible = false;
+  drops.push({ obj, delay, y0: obj.position.y, height, light, state: 0 });
+}
+const lightUp = (obj, delay) => lights.push({ obj, delay, done: false });
+function startLight(obj, T) {
+  obj.traverse((o) => {
+    const lit = o.isMesh && o.material.userData.lit;
+    if (lit && lit.t0 === null) lit.t0 = T;
+  });
+}
+let t = 0.2;
+
 // ---- base: thin white square slab with a colored line on each side ----
-mesh(rbox(BOARD, BOARD, BASE_H, 0.45, 0.03), beige, world);
-camps.forEach((camp, k) => {
+const slab = mesh(rbox(BOARD, BOARD, BASE_H, 0.45, 0.03), beige, world);
+drop(slab, 0, { height: 0.7 });
+const sides = camps.map((camp, k) => {
   const side = new THREE.Group();
   side.rotation.y = -k * Math.PI / 2; // camp k sits on side k (camp 0 on +x)
   world.add(side);
@@ -234,6 +257,7 @@ camps.forEach((camp, k) => {
   mesh(rbox(0.05, 5.2, 0.035, 0.02, 0.008), glow(camp.color), side, BOARD / 2 + 0.005, BASE_H / 2 - 0.0175, 0);
   // inset line on the top face, near the edge
   mesh(rbox(0.07, 6.2, 0.012, 0.035, 0.004), glow(camp.color), side, BOARD / 2 - 0.2, BASE_H, 0);
+  return side;
 });
 
 // ---- cells ----
@@ -245,6 +269,8 @@ function cell(parent, x, z, angle, color, { size = 0.25, thick = 0.032, goal = f
   parent.add(g);
   mesh(rbox(size + 2 * thick, size + 2 * thick, 0.045, 0.06), glow(color), g);
   mesh(rbox(size, size, 0.07, 0.04), goal ? tinted(color, 0.28) : plastic, g);
+  drop(g, t, { light: true });
+  t += STEP_T;
   return g;
 }
 
@@ -256,9 +282,11 @@ function arc(parent, a0, a1, r, color, width = 0.045) {
   m.position.y = TOP_Y + 0.003;
   m.receiveShadow = true;
   parent.add(m);
+  return m;
 }
 
 const goalA = (k) => cellAngle(k, 19 - 3); // cell labeled 3
+const landed = () => t - STEP_T + FALL; // moment the last placed piece touches the board
 
 camps.forEach((camp, k) => {
   // main road
@@ -268,7 +296,7 @@ camps.forEach((camp, k) => {
     const label = 19 - n;
     cell(world, x, z, a, camp.color, label === 1 ? { thick: 0.06 } : {});
   }
-  arc(world, cellAngle(k, 1), cellAngle(k, 18), RR, camp.color);
+  lightUp(arc(world, cellAngle(k, 1), cellAngle(k, 18), RR, camp.color), landed());
 
   // goal lane: 4 cells inward from cell 3
   const ag = goalA(k);
@@ -282,18 +310,28 @@ camps.forEach((camp, k) => {
     const [x, z] = polar(ag, RR - j * STEP);
     cell(world, x, z, ag, camp.color, { goal: true });
   }
+  lightUp(lane, landed());
 
   // stash: built for camp 0 (+x side), then turned by k quarter turns
   const stash = new THREE.Group();
   stash.rotation.y = -k * Math.PI / 2;
   world.add(stash);
   const sz0 = RR * Math.sin(rad(cellAngle(0, 18)));
-  mesh(rbox(0.62, 4 * STEP + 0.26, 0.02, 0.31, 0.006), glow(camp.color), stash, STASH_X, TOP_Y, sz0);
-  mesh(rbox(0.54, 4 * STEP + 0.18, 0.04, 0.27, 0.01), plastic, stash, STASH_X, TOP_Y, sz0);
+  const tray = new THREE.Group();
+  tray.position.set(STASH_X, TOP_Y, sz0);
+  stash.add(tray);
+  mesh(rbox(0.62, 4 * STEP + 0.26, 0.02, 0.31, 0.006), glow(camp.color), tray);
+  mesh(rbox(0.54, 4 * STEP + 0.18, 0.04, 0.27, 0.01), plastic, tray);
+  drop(tray, t, { light: true });
+  t += STEP_T;
   for (let j = 0; j < 4; j++) {
-    const z = sz0 + (j - 1.5) * STEP;
-    cell(stash, STASH_X, z, 0, camp.color);
-    stash.add(pawn(camp.color, STASH_X, TOP_Y + 0.07, z));
+    cell(stash, STASH_X, sz0 + (j - 1.5) * STEP, 0, camp.color);
+  }
+  for (let j = 0; j < 4; j++) {
+    const p = pawn(camp.color, STASH_X, TOP_Y + 0.07, sz0 + (j - 1.5) * STEP);
+    stash.add(p);
+    drop(p, t, { height: 1.4, light: true });
+    t += STEP_T * 1.5;
   }
 });
 
@@ -312,7 +350,7 @@ function pawn(color, x, y, z) {
 {
   const a0 = cellAngle(0, 18) + 5, a1 = a0 + 40;
   const col = '#9aa7cf';
-  arc(world, a0, a1 - 3, ARROW_R, col, 0.06);
+  const line = arc(world, a0, a1 - 3, ARROW_R, col, 0.06);
   const head = new THREE.Shape();
   head.moveTo(0.16, 0); head.lineTo(-0.1, 0.13); head.lineTo(-0.1, -0.13); head.closePath();
   const hg = new THREE.ShapeGeometry(head);
@@ -322,6 +360,8 @@ function pawn(color, x, y, z) {
   hm.position.set(hx, TOP_Y + 0.004, hz);
   hm.rotation.y = -rad(a1 + 90);
   world.add(hm);
+  lightUp(line, landed());
+  lightUp(hm, landed());
 }
 
 // ---- pile of cards in the center ----
@@ -346,7 +386,14 @@ function pawn(color, x, y, z) {
     const dx = k % 2 ? 0.18 : -0.18, dz = k < 2 ? -0.18 : 0.18;
     mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.012, 24), glow(camp.color), top, dx, 0.008, dz);
   });
+  drop(pile, t + 0.1, { height: 2.2, light: true });
+  t += 0.1 + STEP_T;
 }
+sides.forEach((side) => lightUp(side, 0));
+// nothing lights up until the very last piece has landed, then every colored line switches on together
+const LIGHT_AT = landed() + 0.1;
+drops.forEach((d) => { if (d.light) lightUp(d.obj, 0); });
+lights.forEach((l) => { l.delay = LIGHT_AT; });
 
 // ---- soft shadow on the ground ----
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.ShadowMaterial({ opacity: 0.3 }));
@@ -357,10 +404,73 @@ ground.userData.hideInBloom = true;
 scene.add(ground);
 
 // ---- loop ----
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+let T0 = Infinity; // time the intro starts, set once the preloader is gone
 const clock = new THREE.Clock();
+
+function animateIntro(T) {
+  for (const d of drops) {
+    if (d.state === 3 || T < d.delay) continue;
+    const u = (T - d.delay) / FALL;
+    if (d.state === 0) { d.obj.visible = true; d.state = 1; }
+    if (u < 1) {
+      d.obj.position.y = d.y0 + d.height * (1 - u * u);       // gravity: accelerates down
+      d.obj.scale.setScalar(0.55 + 0.45 * clamp01(u * 4));    // pops in while falling
+    } else {
+      if (d.state === 1) d.state = 2;
+      const b = (T - d.delay - FALL) / 0.18;                  // small squash when landing
+      d.obj.position.y = d.y0;
+      d.obj.scale.set(1, 1 - 0.14 * Math.sin(Math.PI * clamp01(b)), 1);
+      if (b >= 1) { d.obj.scale.setScalar(1); d.state = 3; }
+    }
+  }
+  for (const l of lights) {
+    if (!l.done && T >= l.delay) { startLight(l.obj, T); l.done = true; }
+  }
+  for (const m of litMats) {
+    const lit = m.userData.lit;
+    if (lit.t0 === null || lit.done) continue;
+    const k = clamp01((T - lit.t0) / 0.6);
+    m.emissiveIntensity = 0.8 * k + 0.9 * Math.sin(Math.PI * k); // switches on with a little flash
+    m.color.copy(UNLIT).lerp(lit.target, 0.12 + 0.88 * k);
+    if (k >= 1) lit.done = true;
+  }
+}
+
+// slow auto-rotation, paused while the user is dragging and resumed after a short idle
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.7;
+let resumeTimer;
+controls.addEventListener('start', () => { controls.autoRotate = false; clearTimeout(resumeTimer); });
+controls.addEventListener('end', () => { resumeTimer = setTimeout(() => { controls.autoRotate = true; }, 2500); });
+
+// "Light" button: turns the glow on and off (fades, and skips the bloom render while it is off)
+const lightButton = document.getElementById('light');
+let glowOn = true;
+lightButton.addEventListener('click', () => {
+  glowOn = !glowOn;
+  lightButton.classList.toggle('off', !glowOn);
+  lightButton.setAttribute('aria-pressed', String(glowOn));
+});
+
 renderer.setAnimationLoop(() => {
-  world.position.y = Math.sin(clock.getElapsedTime() * 1.2) * 0.06;
+  const now = clock.getElapsedTime();
+  const amount = mixPass.uniforms.bloomAmount;
+  amount.value += ((glowOn ? 1 : 0) - amount.value) * 0.15;
+  if (!glowOn && amount.value < 0.005) amount.value = 0;
+  animateIntro(now - T0);
+  world.position.y = Math.sin(now * 1.2) * 0.06;
   controls.update();
-  renderBloom();
+  if (amount.value > 0) renderBloom();
   finalComposer.render();
 });
+
+// ---- preloader: compile every shader once with all pieces visible, then fade the loader out ----
+drops.forEach((d) => { d.obj.visible = true; });
+renderBloom();
+finalComposer.render();
+drops.forEach((d) => { d.obj.visible = false; });
+setTimeout(() => {
+  document.getElementById('loader').classList.add('done');
+  T0 = clock.getElapsedTime() + 0.5;
+}, 600);
