@@ -365,17 +365,22 @@ function pawn(color, x, y, z) {
 }
 
 // ---- pile of cards in the center ----
+let pileRoot;
+const cardDrops = []; // the drops of the cards, replayed when the pile is clicked
 {
   const CARD_W = 1.05, CARD_D = 1.5, CARD_H = 0.014, COUNT = 10;
   const pile = new THREE.Group();
   pile.position.y = TOP_Y;
   world.add(pile);
+  pileRoot = pile;
+  const cardsStart = t + 0.1;
   const jitter = (i) => Math.sin(i * 12.9898) * 43758.5453 % 1; // deterministic pseudo-random in (-1, 1)
   for (let i = 0; i < COUNT; i++) {
     const c = mesh(rbox(CARD_W, CARD_D, CARD_H, 0.06, 0.003), plastic, pile, jitter(i) * 0.03, i * CARD_H, jitter(i + 50) * 0.03);
     c.rotation.y = rad(-25) + jitter(i + 100) * 0.12;
     // accordion: the cards come down one after another, the upper ones from higher up, and collapse into the pile
-    drop(c, t + 0.1 + i * 0.03, { height: 0.5 + i * 0.075, squash: false });
+    drop(c, cardsStart + i * 0.03, { height: 0.5 + i * 0.075, squash: false });
+    cardDrops.push(drops[drops.length - 1]);
   }
   // card back on top: colored frame, tinted face, one dot per camp
   const top = new THREE.Group();
@@ -397,7 +402,7 @@ function pawn(color, x, y, z) {
   if ('letterSpacing' in cx) cx.letterSpacing = '2px';
   cx.fillStyle = '#5a6aa3';
   cx.font = 'italic 900 185px "Trebuchet MS", Arial, sans-serif';
-  cx.fillText('Prestige', 512, 415);
+  cx.fillText('PRESTIGE', 512, 415);
   camps.forEach((camp, k) => {
     cx.fillStyle = camp.color;
     cx.beginPath();
@@ -415,12 +420,22 @@ function pawn(color, x, y, z) {
   text.position.y = 0.0095;
   text.rotation.y = Math.PI / 2; // reads along the long side of the card
   top.add(text);
-  drop(top, t + 0.1 + COUNT * 0.03, { height: 0.5 + COUNT * 0.075, light: true, squash: false });
+  drop(top, cardsStart + COUNT * 0.03, { height: 0.5 + COUNT * 0.075, light: true, squash: false });
+  cardDrops.push(drops[drops.length - 1]);
+  cardDrops.forEach((d) => { d.rel = d.delay - cardsStart; });
   t += 0.1 + COUNT * 0.03 + STEP_T;
 }
 sides.forEach((side) => lightUp(side, 0));
 // nothing lights up until the very last piece has landed, then every colored line switches on together
 const LIGHT_AT = landed() + 0.1;
+// the standalone lines (side stripes, road arcs, lane lines, arrow) stay hidden until the board has landed
+const lines = lights.map((l) => l.obj);
+lines.forEach((o) => { o.visible = false; });
+const lineMats = new Set();
+lines.forEach((o) => o.traverse((m) => { if (m.isMesh) lineMats.add(m.material); }));
+const LINES_FADE = 1.4; // seconds to fade the lines in once the board has landed
+let linesShown = false;
+let linesDone = false;
 drops.forEach((d) => { if (d.light) lightUp(d.obj, 0); });
 lights.forEach((l) => { l.delay = LIGHT_AT; });
 
@@ -438,19 +453,38 @@ let T0 = Infinity; // time the intro starts, set once the preloader is gone
 const clock = new THREE.Clock();
 
 function animateIntro(T) {
+  if (!linesDone && T >= FALL) {
+    if (!linesShown) {
+      linesShown = true;
+      lineMats.forEach((m) => { m.transparent = true; m.opacity = 0; });
+      lines.forEach((o) => { o.visible = true; });
+    }
+    const k = clamp01((T - FALL) / LINES_FADE);
+    lineMats.forEach((m) => { m.opacity = k * k * (3 - 2 * k); }); // smoothstep fade-in
+    if (k >= 1) { linesDone = true; lineMats.forEach((m) => { m.transparent = false; m.opacity = 1; }); }
+  }
   for (const d of drops) {
+    if (d.backDelay !== undefined) {                          // click replay, part 1: the cards rise into an accordion (they stay visible)
+      if (T < d.backDelay) continue;
+      const v = clamp01((T - d.backDelay) / FALL);
+      d.obj.position.y = d.y0 + d.height * (1 - (1 - v) * (1 - v));
+      if (v < 1) continue;
+      d.backDelay = undefined;
+      d.keep = true;                                          // part 2 (the fall) starts from this raised position, without the intro's pop-in
+      d.state = 0;
+    }
     if (d.state === 3 || T < d.delay) continue;
     const u = (T - d.delay) / FALL;
     if (d.state === 0) { d.obj.visible = true; d.state = 1; }
     if (u < 1) {
       d.obj.position.y = d.y0 + d.height * (1 - u * u);       // gravity: accelerates down
-      d.obj.scale.setScalar(0.55 + 0.45 * clamp01(u * 4));    // pops in while falling
+      d.obj.scale.setScalar(d.keep ? 1 : 0.55 + 0.45 * clamp01(u * 4)); // pops in while falling (intro only)
     } else {
       if (d.state === 1) d.state = 2;
       const b = (T - d.delay - FALL) / 0.18;                  // small squash when landing
       d.obj.position.y = d.y0;
       d.obj.scale.set(1, 1 - (d.squash ? 0.14 : 0) * Math.sin(Math.PI * clamp01(b)), 1);
-      if (b >= 1) { d.obj.scale.setScalar(1); d.state = 3; }
+      if (b >= 1) { d.obj.scale.setScalar(1); d.state = 3; d.keep = false; }
     }
   }
   for (const l of lights) {
@@ -484,8 +518,39 @@ lightButton.addEventListener('click', () => {
   lightButton.setAttribute('aria-pressed', String(glowOn));
 });
 
+// click on the deck: replay the cards' fall (only the cards, the board stays as it is)
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const overPile = (e) => {
+  const r = renderer.domElement.getBoundingClientRect();
+  pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  return raycaster.intersectObject(pileRoot, true).length > 0;
+};
+const introDone = () => lastT > LIGHT_AT;
+const cardsIdle = () => cardDrops.every((d) => d.state === 3 && d.backDelay === undefined);
+let downAt = null;
+renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return; // it was a drag
+  downAt = null;
+  if (!introDone() || !cardsIdle() || !overPile(e)) return;
+  // the cards rise (top card first) into an accordion, then fall back (bottom card first)
+  const start = lastT + 0.05;
+  const span = Math.max(...cardDrops.map((d) => d.rel));
+  cardDrops.forEach((d) => {
+    d.backDelay = start + (span - d.rel);
+    d.delay = start + span + FALL + d.rel;
+  });
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (e.buttons === 0) renderer.domElement.style.cursor = introDone() && cardsIdle() && overPile(e) ? 'pointer' : '';
+});
+
+let lastT = -Infinity;
 renderer.setAnimationLoop(() => {
   const now = clock.getElapsedTime();
+  lastT = now - T0;
   const amount = mixPass.uniforms.bloomAmount;
   amount.value += ((glowOn ? 1 : 0) - amount.value) * 0.15;
   if (!glowOn && amount.value < 0.005) amount.value = 0;
@@ -498,9 +563,11 @@ renderer.setAnimationLoop(() => {
 
 // ---- preloader: compile every shader once with all pieces visible, then fade the loader out ----
 drops.forEach((d) => { d.obj.visible = true; });
+lines.forEach((o) => { o.visible = true; });
 renderBloom();
 finalComposer.render();
 drops.forEach((d) => { d.obj.visible = false; });
+lines.forEach((o) => { o.visible = false; });
 setTimeout(() => {
   document.getElementById('loader').classList.add('done');
   T0 = clock.getElapsedTime() + 0.5;
