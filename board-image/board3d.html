@@ -28,7 +28,7 @@
     @keyframes hop { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-14px); } }
     #light {
       position: fixed; top: 14px; right: 14px; z-index: 5; cursor: pointer;
-      display: flex; align-items: center; gap: 8px; padding: 8px 14px 8px 12px;
+      display: none; /* hidden for now: switch back to flex to show it */ align-items: center; gap: 8px; padding: 8px 14px 8px 12px;
       font: inherit; font-size: 13px; letter-spacing: .06em; color: #4d5a80;
       background: rgba(255, 255, 255, .75); border: 1px solid rgba(120, 140, 200, .35);
       border-radius: 999px; backdrop-filter: blur(6px); box-shadow: 0 2px 10px rgba(80, 100, 160, .15);
@@ -61,7 +61,7 @@
     </div>
     <span>Tock Prestige</span>
   </div>
-  <button id="light" type="button" aria-pressed="true"><i></i>Light</button>
+  <button id="light" type="button" aria-pressed="false"><i></i>Light</button>
   <div id="hint">glisser pour tourner · molette pour zoomer · double-clic pour recentrer</div>
   <script type="module" src="board3d.js"></script>
 </body>

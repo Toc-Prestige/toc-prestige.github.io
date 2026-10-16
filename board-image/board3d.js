@@ -126,7 +126,7 @@ aoPass.render = (...args) => {
 };
 finalComposer.addPass(aoPass);
 const mixPass = new ShaderPass(new THREE.ShaderMaterial({
-  uniforms: { baseTexture: { value: null }, bloomTexture: { value: bloomComposer.renderTarget2.texture }, bloomAmount: { value: 1 } },
+  uniforms: { baseTexture: { value: null }, bloomTexture: { value: bloomComposer.renderTarget2.texture }, bloomAmount: { value: 0 } },
   vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
   fragmentShader: 'uniform sampler2D baseTexture; uniform sampler2D bloomTexture; uniform float bloomAmount; varying vec2 vUv; void main() { gl_FragColor = texture2D(baseTexture, vUv) + vec4(texture2D(bloomTexture, vUv).rgb * bloomAmount, 0.0); }',
 }), 'baseTexture');
@@ -446,7 +446,9 @@ controls.addEventListener('end', () => { resumeTimer = setTimeout(() => { contro
 
 // "Light" button: turns the glow on and off (fades, and skips the bloom render while it is off)
 const lightButton = document.getElementById('light');
-let glowOn = true;
+lightButton.classList.add('off');
+lightButton.setAttribute('aria-pressed', 'false');
+let glowOn = false;
 lightButton.addEventListener('click', () => {
   glowOn = !glowOn;
   lightButton.classList.toggle('off', !glowOn);
